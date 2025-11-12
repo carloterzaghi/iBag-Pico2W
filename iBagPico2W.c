@@ -7,32 +7,37 @@
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 #include "lwip/dns.h"
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/dhcp.h"
 #include "lwip/apps/httpd.h"
 #include "lwip/apps/fs.h"
+#include "simple_http_server.h"
+#include "dhcp_server.h"
 
 // Configurações do Access Point
 #define AP_SSID "iBag-Pico2W"
-#define AP_PASSWORD "ibag1234"
-#define AP_CHANNEL 6
+#define AP_PASSWORD "ibag12345678"
+#define AP_CHANNEL 1
 
-// Configurações de temperatura (valores configuráveis)
-static float target_heater_temp = 25.0f;
-static float target_freezer_temp = -5.0f;
-static bool is_shaken = false;
+// Configurações de temperatura (valores configuráveis - NÃO-STATIC para acesso externo)
+float target_heater_temp = 25.0f;
+float target_freezer_temp = -5.0f;
+bool is_shaken = false;
 
-// Função para gerar temperatura aleatória com variação
-static float generate_random_temp(float target, float variation) {
+// Função para gerar temperatura aleatória com variação (NÃO-STATIC para acesso externo)
+float generate_random_temp(float target, float variation) {
     float random_offset = ((float)rand() / RAND_MAX) * variation * 2.0f - variation;
     return target + random_offset;
 }
 
 // Função para gerar estado de "virou" aleatoriamente (20% de chance)
-static bool check_random_shake() {
+bool check_random_shake(void) {
     return (rand() % 100) < 20;  // 20% chance de ter sido balançado
 }
 
-// Conteúdo HTML embutido
-static const char html_content[] = 
+// Conteúdo HTML embutido (não-static para ser acessível externamente)
+const char html_content[] = 
 "<!DOCTYPE html>\n"
 "<html lang=\"pt-BR\">\n"
 "<head>\n"
@@ -393,11 +398,27 @@ void httpd_post_finished(void *connection, char *response_uri, u16_t response_ur
 
 // Handler para fornecer conteúdo dos arquivos
 int fs_open_custom(struct fs_file *file, const char *name) {
-    if (strcmp(name, "/index.html") == 0) {
+    static bool first_request = true;
+    
+    if (first_request) {
+        printf("\n");
+        printf("╔════════════════════════════════════╗\n");
+        printf("║  CLIENTE CONECTADO AO WIFI!       ║\n");
+        printf("║  Primeira requisição HTTP recebida ║\n");
+        printf("╚════════════════════════════════════╝\n");
+        printf("\n");
+        first_request = false;
+    }
+    
+    printf(">>> Requisição HTTP: %s\n", name);
+    
+    // Servir a página principal tanto para / quanto para /index.html
+    if (strcmp(name, "/") == 0 || strcmp(name, "/index.html") == 0) {
         file->data = html_content;
         file->len = sizeof(html_content) - 1;
         file->index = 0;
         file->flags = FS_FILE_FLAGS_HEADER_INCLUDED;
+        printf(">>> Servindo página principal (%d bytes)\n", file->len);
         return 1;
     }
     else if (strcmp(name, "/api_config.json") == 0) {
@@ -446,6 +467,7 @@ int fs_open_custom(struct fs_file *file, const char *name) {
         return 1;
     }
     
+    printf("Arquivo não encontrado: %s\n", name);
     return 0;
 }
 
@@ -456,6 +478,17 @@ int fs_read_custom(struct fs_file *file, char *buffer, int count) {
 
 void fs_close_custom(struct fs_file *file) {
     // Não precisa fazer nada, dados são estáticos
+}
+
+// Variável para rastrear clientes conectados
+static int connected_clients = 0;
+
+// Callback para status da interface de rede
+void netif_status_callback(struct netif *netif) {
+    if (netif_is_up(netif) && netif_is_link_up(netif)) {
+        printf("\n>>> INTERFACE DE REDE ATIVA <<<\n");
+        printf("IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif)));
+    }
 }
 
 int main() {
@@ -480,25 +513,99 @@ int main() {
     printf("Access Point iniciado!\n");
     printf("SSID: %s\n", AP_SSID);
     printf("Senha: %s\n", AP_PASSWORD);
-    printf("IP: 192.168.4.1\n\n");
     
-    // Inicializar servidor HTTP
-    httpd_init();
-    http_set_cgi_handlers(cgi_handlers, sizeof(cgi_handlers) / sizeof(tCGI));
+    // Obter interface de rede
+    struct netif *n = &cyw43_state.netif[CYW43_ITF_AP];
     
-    printf("Servidor HTTP iniciado na porta 80\n");
-    printf("Acesse: http://192.168.4.1\n\n");
-    printf("Aguardando conexões...\n\n");
+    // Configurar IP manualmente
+    ip4_addr_t ipaddr, netmask, gw;
+    IP4_ADDR(&ipaddr, 192, 168, 4, 1);
+    IP4_ADDR(&netmask, 255, 255, 255, 0);
+    IP4_ADDR(&gw, 192, 168, 4, 1);
+    netif_set_addr(n, &ipaddr, &netmask, &gw);
+    
+    printf("IP configurado: %s\n", ip4addr_ntoa(netif_ip4_addr(n)));
+    printf("Netmask: %s\n", ip4addr_ntoa(netif_ip4_netmask(n)));
+    printf("Gateway: %s\n\n", ip4addr_ntoa(netif_ip4_gw(n)));
+    
+    // Configurar callback de status da interface
+    netif_set_status_callback(n, netif_status_callback);
+    
+    // Levantar a interface
+    netif_set_up(n);
+    netif_set_link_up(n);
+    
+    printf("Interface de rede ativada\n");
+    
+    // Aguardar AP estar completamente pronto
+    sleep_ms(3000);
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════╗\n");
+    printf("║  AP PRONTO PARA ACEITAR CONEXÕES WiFi!           ║\n");
+    printf("╚════════════════════════════════════════════════════╝\n");
+    printf("\n");
+    
+    printf("⚠️  PROBLEMA CONHECIDO: DHCP pode não funcionar\n");
+    printf("\n");
+    printf("📱 SOLUÇÃO - Configure IP MANUALMENTE no celular:\n");
+    printf("   1. Conecte ao WiFi: iBag-Pico2W\n");
+    printf("   2. Se ficar em loop, vá em Configurações Avançadas\n");
+    printf("   3. Mude de DHCP para IP ESTÁTICO\n");
+    printf("   4. Configure:\n");
+    printf("      • IP: 192.168.4.2\n");
+    printf("      • Máscara: 255.255.255.0\n");
+    printf("      • Gateway: 192.168.4.1\n");
+    printf("      • DNS: 192.168.4.1\n");
+    printf("   5. Salve e reconecte\n");
+    printf("   6. Abra o navegador: http://192.168.4.1:8000\n");
+    printf("\n");
+    
+    // Inicializar servidor DHCP (igual ao MicroPython!)
+    printf("Inicializando servidor DHCP...\n");
+    dhcp_server_init();
+    printf("\n");
+    
+    // Inicializar nosso servidor HTTP simples
+    printf("Inicializando servidor HTTP customizado...\n");
+    simple_http_server_init();
+    
+    // Verificar se a pilha TCP está funcionando
+    printf("Interface de rede UP: %s\n", netif_is_up(n) ? "SIM" : "NÃO");
+    printf("Link UP: %s\n", netif_is_link_up(n) ? "SIM" : "NÃO");
+    
+    printf("\n=================================\n");
+    printf("🎉 SISTEMA COMPLETO ATIVO!  🎉\n");
+    printf("=================================\n");
+    printf("📡 DHCP Server: Porta 67\n");
+    printf("🌐 HTTP Server: Porta 8000\n");
+    printf("🔗 Acesse: http://192.168.4.1:8000\n");
+    printf("=================================\n\n");
+    printf("✅ Agora você NÃO precisa configurar IP manual!\n");
+    printf("   O dispositivo receberá IP automaticamente via DHCP\n\n");
+    printf("(Se não funcionar, verifique se o dispositivo obteve IP via DHCP)\n\n");
     
     // LED piscando para indicar que está funcionando
+    uint32_t led_counter = 0;
+    uint32_t status_print_counter = 0;
+    
     while (true) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        sleep_ms(100);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-        sleep_ms(900);
-        
-        // Processar eventos de rede
+        // Processar eventos de rede constantemente
         cyw43_arch_poll();
+        
+        // LED piscando (controle por contador ao invés de sleep)
+        if (led_counter % 10000 == 0) {
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, (led_counter / 10000) % 2);
+        }
+        led_counter++;
+        
+        // Print de status a cada 5 segundos
+        if (status_print_counter % 5000 == 0 && status_print_counter > 0) {
+            printf("[STATUS] Sistema rodando... Aguardando conexões...\n");
+        }
+        status_print_counter++;
+        
+        // Pequeno delay para não sobrecarregar a CPU
+        sleep_ms(1);
     }
     
     cyw43_arch_deinit();

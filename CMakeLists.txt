@@ -35,7 +35,11 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(iBagPico2W iBagPico2W.c )
+add_executable(iBagPico2W 
+    iBagPico2W.c
+    simple_http_server.c
+    dhcp_server.c
+)
 
 pico_set_program_name(iBagPico2W "iBagPico2W")
 pico_set_program_version(iBagPico2W "0.1")
