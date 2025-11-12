@@ -86,13 +86,15 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                 // Roteamento
                 if (is_get && (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0)) {
                     // Página principal
+                    int html_len = strlen(html_content);
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
                         "Content-Type: text/html; charset=UTF-8\r\n"
+                        "Content-Length: %d\r\n"
                         "Connection: close\r\n"
                         "\r\n"
-                        "%s", html_content);
-                    printf("Servindo página principal (%d bytes)\n", len);
+                        "%s", html_len, html_content);
+                    printf("Servindo página principal (%d bytes HTML, %d bytes total)\n", html_len, len);
                 }
                 else if (is_get && strcmp(uri, "/api/status") == 0) {
                     // API de status
@@ -104,16 +106,17 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                     }
                     
                     char json[256];
-                    snprintf(json, sizeof(json),
+                    int json_len = snprintf(json, sizeof(json),
                             "{\"heater\":%.1f,\"freezer\":%.1f,\"shaken\":%s}",
                             current_heater, current_freezer, is_shaken ? "true" : "false");
                     
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
                         "Content-Type: application/json\r\n"
+                        "Content-Length: %d\r\n"
                         "Connection: close\r\n"
                         "\r\n"
-                        "%s", json);
+                        "%s", json_len, json);
                     printf("API Status: %s\n", json);
                 }
                 else if (is_post && strcmp(uri, "/api/config") == 0) {
@@ -141,28 +144,33 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                     }
                     
                     char json[128];
-                    snprintf(json, sizeof(json),
+                    int json_len = snprintf(json, sizeof(json),
                             "{\"status\":\"ok\",\"heater\":%.1f,\"freezer\":%.1f}",
                             target_heater_temp, target_freezer_temp);
                     
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
                         "Content-Type: application/json\r\n"
+                        "Content-Length: %d\r\n"
                         "Connection: close\r\n"
                         "\r\n"
-                        "%s", json);
+                        "%s", json_len, json);
                     printf("Config atualizada: %s\n", json);
                 }
                 else if (is_post && strcmp(uri, "/api/reset") == 0) {
                     is_shaken = false;
                     printf("Estado balançado resetado\n");
                     
+                    const char *json = "{\"status\":\"ok\"}";
+                    int json_len = strlen(json);
+                    
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
                         "Content-Type: application/json\r\n"
+                        "Content-Length: %d\r\n"
                         "Connection: close\r\n"
                         "\r\n"
-                        "{\"status\":\"ok\"}");
+                        "%s", json_len, json);
                 }
                 else {
                     // 404 Not Found
@@ -178,7 +186,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
         }
     }
     
-    // Enviar resposta em chunks para evitar overflow do buffer TCP
+    // Enviar resposta
     if (len > 0) {
         // Criar estrutura de estado para rastrear envio
         struct http_state *hs = (struct http_state *)malloc(sizeof(struct http_state));
@@ -195,38 +203,52 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
         // Associar estado à conexão
         tcp_arg(pcb, hs);
         
-        int sent = 0;
-        int chunk_size = 1024; // 1KB por vez
-        
-        while (sent < len) {
-            int to_send = (len - sent) < chunk_size ? (len - sent) : chunk_size;
-            
-            // Verificar espaço disponível no buffer TCP
-            int available = tcp_sndbuf(pcb);
-            if (available < to_send) {
-                to_send = available;
-            }
-            
-            if (to_send > 0) {
-                err_t write_err = tcp_write(pcb, response + sent, to_send, TCP_WRITE_FLAG_COPY);
-                if (write_err == ERR_OK) {
-                    sent += to_send;
-                    // NÃO atualizar hs->total_sent aqui - será feito no callback http_sent()
-                } else {
-                    printf("ERRO ao enviar chunk: %d\n", write_err);
-                    break;
-                }
-            } else {
-                // Buffer cheio, forçar envio e aguardar
+        // Para respostas pequenas (<2KB), enviar tudo de uma vez
+        if (len < 2048) {
+            err_t write_err = tcp_write(pcb, response, len, TCP_WRITE_FLAG_COPY);
+            if (write_err == ERR_OK) {
                 tcp_output(pcb);
-                sleep_ms(10);
+                printf("Resposta pequena enviada: %d bytes\n", len);
+            } else {
+                printf("ERRO ao enviar resposta pequena: %d\n", write_err);
+                tcp_arg(pcb, NULL);
+                free(hs);
+                tcp_close(pcb);
             }
+        } else {
+            // Para respostas grandes, enviar em chunks
+            int sent = 0;
+            int chunk_size = 1460; // Tamanho do MSS
+            
+            while (sent < len) {
+                int to_send = (len - sent) < chunk_size ? (len - sent) : chunk_size;
+                
+                // Verificar espaço disponível no buffer TCP
+                int available = tcp_sndbuf(pcb);
+                if (available < to_send) {
+                    to_send = available;
+                }
+                
+                if (to_send > 0) {
+                    err_t write_err = tcp_write(pcb, response + sent, to_send, TCP_WRITE_FLAG_COPY);
+                    if (write_err == ERR_OK) {
+                        sent += to_send;
+                    } else {
+                        printf("ERRO ao enviar chunk: %d\n", write_err);
+                        break;
+                    }
+                } else {
+                    // Buffer cheio, forçar envio e aguardar
+                    tcp_output(pcb);
+                    sleep_ms(10);
+                }
+            }
+            
+            // Forçar envio de todos os dados pendentes
+            tcp_output(pcb);
+            
+            printf("Total enfileirado: %d de %d bytes\n", sent, len);
         }
-        
-        // Forçar envio de todos os dados pendentes
-        tcp_output(pcb);
-        
-        printf("Total enfileirado: %d de %d bytes\n", sent, len);
     } else {
         tcp_close(pcb);
     }
