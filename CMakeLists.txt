@@ -39,6 +39,7 @@ add_executable(iBagPico2W
     iBagPico2W.c
     simple_http_server.c
     dhcp_server.c
+    mpu6050.c
 )
 
 pico_set_program_name(iBagPico2W "iBagPico2W")
@@ -52,7 +53,9 @@ pico_enable_stdio_usb(iBagPico2W 1)
 target_link_libraries(iBagPico2W
         pico_stdlib
         pico_cyw43_arch_lwip_poll
-        pico_lwip_http)
+        pico_lwip_http
+        hardware_adc
+        hardware_i2c)
 
 # Add the standard include files to the build
 target_include_directories(iBagPico2W PRIVATE

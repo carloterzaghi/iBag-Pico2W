@@ -10,9 +10,13 @@ extern float target_heater_temp;
 extern float target_freezer_temp;
 extern bool is_shaken;
 
-// Funções auxiliares (declaradas em iBagPico2W.c)
-extern float generate_random_temp(float base, float variance);
-extern bool check_random_shake(void);
+// Definições dos ADC channels
+#define ADC_HEATER 1    // ADC1 - GPIO 27 (aquecedor)
+#define ADC_FREEZER 0   // ADC0 - GPIO 26 (congelador)
+
+// Funções auxiliares (declaradas em iBagPico2W.c e mpu6050.c)
+extern float read_lm35_temp(uint8_t adc_channel);
+extern bool mpu6050_detect_shake(void);
 
 // Estrutura para rastrear estado da conexão
 struct http_state {
@@ -97,12 +101,12 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                     printf("Servindo página principal (%d bytes HTML, %d bytes total)\n", html_len, len);
                 }
                 else if (is_get && strcmp(uri, "/api/status") == 0) {
-                    // API de status
-                    float current_heater = generate_random_temp(target_heater_temp, 2.0f);
-                    float current_freezer = generate_random_temp(target_freezer_temp, 1.5f);
+                    // API de status - ler sensores LM35 reais
+                    float current_heater = read_lm35_temp(ADC_HEATER);
+                    float current_freezer = read_lm35_temp(ADC_FREEZER);
                     
                     if (!is_shaken) {
-                        is_shaken = check_random_shake();
+                        is_shaken = mpu6050_detect_shake();
                     }
                     
                     char json[256];

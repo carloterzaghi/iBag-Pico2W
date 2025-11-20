@@ -4,6 +4,7 @@
 #include <time.h>
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
+#include "hardware/adc.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 #include "lwip/dns.h"
@@ -14,6 +15,7 @@
 #include "lwip/apps/fs.h"
 #include "simple_http_server.h"
 #include "dhcp_server.h"
+#include "mpu6050.h"
 #include "web_content.h"  // Conteúdo HTML da interface web
 
 // Configurações do Access Point
@@ -21,20 +23,35 @@
 #define AP_PASSWORD "ibag12345678"
 #define AP_CHANNEL 1
 
+// Configurações dos sensores LM35
+// GPIO 26 = ADC0, GPIO 27 = ADC1
+#define ADC_HEATER 1    // ADC1 - GPIO 27 (aquecedor)
+#define ADC_FREEZER 0   // ADC0 - GPIO 26 (congelador)
+
 // Configurações de temperatura (valores configuráveis - NÃO-STATIC para acesso externo)
-float target_heater_temp = 25.0f;
-float target_freezer_temp = -5.0f;
+float target_heater_temp = 25.0f;   // Mantido para referência/configuração futura
+float target_freezer_temp = -5.0f;  // Mantido para referência/configuração futura
 bool is_shaken = false;
 
-// Função para gerar temperatura aleatória com variação (NÃO-STATIC para acesso externo)
-float generate_random_temp(float target, float variation) {
-    float random_offset = ((float)rand() / RAND_MAX) * variation * 2.0f - variation;
-    return target + random_offset;
+// Função para inicializar o ADC
+void init_adc_sensors(void) {
+    adc_init();
+    adc_gpio_init(26);  // GPIO 26 como entrada analógica (ADC0)
+    adc_gpio_init(27);  // GPIO 27 como entrada analógica (ADC1)
+    printf("Sensores LM35 inicializados:\n");
+    printf("  - GPIO 27 (ADC1): Aquecedor\n");
+    printf("  - GPIO 26 (ADC0): Congelador\n\n");
 }
 
-// Função para gerar estado de "virou" aleatoriamente (20% de chance)
-bool check_random_shake(void) {
-    return (rand() % 100) < 20;  // 20% chance de ter sido balançado
+// Função para ler temperatura do LM35 (retorna em Celsius)
+// LM35: 10mV/°C, ADC: 12-bit (0-4095), Vref: 3.3V
+// Temp (°C) = (ADC_value * 3.3 / 4095) / 0.01
+float read_lm35_temp(uint8_t adc_channel) {
+    adc_select_input(adc_channel);
+    uint16_t adc_value = adc_read();
+    float voltage = (adc_value * 3.3f) / 4095.0f;
+    float temperature = voltage / 0.01f;  // LM35: 10mV/°C
+    return temperature;
 }
 
 // Handler para a página principal
@@ -149,13 +166,13 @@ int fs_open_custom(struct fs_file *file, const char *name) {
     else if (strcmp(name, "/api_status.json") == 0) {
         static char json_response[256];
         
-        // Gerar temperaturas atuais com pequena variação
-        float current_heater = generate_random_temp(target_heater_temp, 2.0f);
-        float current_freezer = generate_random_temp(target_freezer_temp, 1.5f);
+        // Ler temperaturas reais dos sensores LM35
+        float current_heater = read_lm35_temp(ADC_HEATER);
+        float current_freezer = read_lm35_temp(ADC_FREEZER);
         
-        // Verificar aleatoriamente se foi balançado
+        // Verificar virada brusca usando MPU6050
         if (!is_shaken) {
-            is_shaken = check_random_shake();
+            is_shaken = mpu6050_detect_shake();
         }
         
         snprintf(json_response, sizeof(json_response),
@@ -170,6 +187,7 @@ int fs_open_custom(struct fs_file *file, const char *name) {
     }
     else if (strcmp(name, "/api_reset.json") == 0) {
         is_shaken = false;
+        mpu6050_reset_shake_detection();
         printf("Estado balançado resetado\n");
         
         static char json_response[64];
@@ -214,6 +232,16 @@ int main() {
     printf("\n=================================\n");
     printf("iBag - Pico 2 W Access Point\n");
     printf("=================================\n\n");
+    
+    // Inicializar sensores LM35
+    init_adc_sensors();
+    
+    // Inicializar MPU6050 (acelerômetro/giroscópio)
+    if (!mpu6050_init()) {
+        printf("ERRO: Falha ao inicializar MPU6050!\n");
+        printf("Verifique as conexões I2C (SDA=GPIO20, SCL=GPIO21)\n");
+        return 1;
+    }
     
     // Inicializar Wi-Fi em modo AP
     if (cyw43_arch_init()) {
@@ -288,7 +316,7 @@ int main() {
     printf("Link UP: %s\n", netif_is_link_up(n) ? "SIM" : "NÃO");
     
     printf("\n=================================\n");
-    printf("🎉 SISTEMA COMPLETO ATIVO!  🎉\n");
+    printf(" SISTEMA COMPLETO ATIVO! \n");
     printf("=================================\n");
     printf("📡 DHCP Server: Porta 67\n");
     printf("🌐 HTTP Server: Porta 8000\n");
@@ -305,6 +333,9 @@ int main() {
     while (true) {
         // Processar eventos de rede constantemente
         cyw43_arch_poll();
+        
+        // Atualizar processo de calibração do MPU6050
+        mpu6050_update_calibration();
         
         // LED piscando (controle por contador ao invés de sleep)
         if (led_counter % 10000 == 0) {
