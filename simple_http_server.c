@@ -17,6 +17,8 @@ extern bool is_shaken;
 // Funções auxiliares (declaradas em iBagPico2W.c e mpu6050.c)
 extern float read_lm35_temp(uint8_t adc_channel);
 extern bool mpu6050_detect_shake(void);
+extern void mpu6050_reset_shake_detection(void);
+extern void mpu6050_update_calibration(void);
 
 // Estrutura para rastrear estado da conexão
 struct http_state {
@@ -162,9 +164,28 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                     printf("Config atualizada: %s\n", json);
                 }
                 else if (is_post && strcmp(uri, "/api/reset") == 0) {
-                    is_shaken = false;
-                    printf("Estado balançado resetado\n");
+                    printf("\n🔄 RESETANDO ESTADO E RECALIBRANDO...\n");
                     
+                    // Reset do estado
+                    is_shaken = false;
+                    
+                    printf("Estado balançado resetado\n");
+                    printf("⏱️  Iniciando calibração do MPU6050...\n");
+                    printf("    NÃO MOVA O DISPOSITIVO por 10 segundos!\n\n");
+                    
+                    // IMPORTANTE: Resetar e calibrar ANTES de responder HTTP
+                    mpu6050_reset_shake_detection();
+                    
+                    // Aguardar calibração completar (10 segundos) ANTES de responder
+                    for (int i = 10; i > 0; i--) {
+                        printf("    Calibrando... %d segundos restantes\n", i);
+                        sleep_ms(1000);
+                        mpu6050_update_calibration();
+                    }
+                    
+                    printf("\n✅ Calibração completa! Sistema pronto para detectar movimento.\n\n");
+                    
+                    // Agora sim, responder HTTP
                     const char *json = "{\"status\":\"ok\"}";
                     int json_len = strlen(json);
                     
