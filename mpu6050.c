@@ -13,7 +13,8 @@
 
 // Thresholds para detecção de virada brusca
 #define ACCEL_THRESHOLD 20000   // Threshold para aceleração (valores brutos)
-#define GYRO_THRESHOLD 15000    // Threshold para giroscópio (valores brutos)
+#define GYRO_Z_RATE_THRESHOLD 8000  // Taxa de variação do Gyro Z para detectar giro brusco
+#define GYRO_Z_ABSOLUTE_THRESHOLD 12000  // Valor absoluto alto do Gyro Z
 #define CALIBRATION_TIME_MS 10000  // 10 segundos para calibração
 
 // Variável estática para rastrear se houve shake
@@ -25,6 +26,10 @@ static uint32_t calibration_start_time = 0;
 static bool is_calibrated = false;
 static mpu6050_accel_t baseline_accel = {0, 0, 0};
 static mpu6050_gyro_t baseline_gyro = {0, 0, 0};
+
+// Variáveis para monitorar taxa de variação do Gyro Z
+static int16_t last_gyro_z = 0;
+static bool has_last_gyro_z = false;
 
 // Leitura de registrador do MPU6050
 static bool mpu6050_read_reg(uint8_t reg, uint8_t *data, size_t len) {
@@ -109,22 +114,36 @@ bool mpu6050_read_gyro(mpu6050_gyro_t *gyro) {
 
 // Detectar virada brusca
 bool mpu6050_detect_shake(void) {
-    // Se já detectou shake, retornar true
-    if (shake_detected) {
-        return true;
-    }
-    
-    // Se ainda está calibrando, não detectar shake
-    if (is_calibrating || !is_calibrated) {
-        return false;
-    }
-    
     mpu6050_accel_t accel;
     mpu6050_gyro_t gyro;
     
     // Ler dados do sensor
     if (!mpu6050_read_accel(&accel) || !mpu6050_read_gyro(&gyro)) {
+        printf("[MPU6050] ERRO: Falha ao ler dados do sensor!\n");
         return false;
+    }
+    
+    // Se está calibrando, mostrar status
+    if (is_calibrating) {
+        printf("[MPU6050] CALIBRANDO... Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d\n",
+               accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
+        has_last_gyro_z = false;  // Reset durante calibração
+        return false;
+    }
+    
+    // Se não está calibrado, mostrar status
+    if (!is_calibrated) {
+        printf("[MPU6050] NAO CALIBRADO! Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d\n",
+               accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
+        has_last_gyro_z = false;  // Reset se não calibrado
+        return false;
+    }
+    
+    // Se já detectou shake, retornar true (mas ainda mostrar dados)
+    if (shake_detected) {
+        printf("[MPU6050] SHAKE JA DETECTADO! Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d\n",
+               accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
+        return true;
     }
     
     // Calcular diferença em relação à linha base (posição de referência)
@@ -132,27 +151,46 @@ bool mpu6050_detect_shake(void) {
                          abs(accel.y - baseline_accel.y) + 
                          abs(accel.z - baseline_accel.z);
     
-    int32_t gyro_diff = abs(gyro.x - baseline_gyro.x) + 
-                        abs(gyro.y - baseline_gyro.y) + 
-                        abs(gyro.z - baseline_gyro.z);
+    // Calcular taxa de variação do Gyro Z (diferença entre leitura atual e anterior)
+    int32_t gyro_z_rate = 0;
+    if (has_last_gyro_z) {
+        gyro_z_rate = abs(gyro.z - last_gyro_z);
+    }
+    
+    // Valor absoluto do Gyro Z em relação à baseline
+    int32_t gyro_z_absolute = abs(gyro.z - baseline_gyro.z);
+    
+    // Atualizar histórico
+    last_gyro_z = gyro.z;
+    has_last_gyro_z = true;
     
     // Log detalhado dos valores do MPU6050
-    printf("[MPU6050] Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d | Diff: A=%6ld G=%6ld\n",
-           accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z, accel_diff, gyro_diff);
+    // printf("[MPU6050] Gyro.Z: %6d | Z_rate: %6ld | Z_abs: %6ld | Accel_diff: %6ld\n",
+    //        gyro.z, gyro_z_rate, gyro_z_absolute, accel_diff);
     
-    // Detectar virada brusca se a diferença exceder threshold
-    if (accel_diff > ACCEL_THRESHOLD || gyro_diff > GYRO_THRESHOLD) {
+    // Detectar virada brusca:
+    // 1. Se a TAXA DE VARIAÇÃO do Gyro Z for muito alta (mudança rápida)
+    // 2. OU se o valor absoluto do Gyro Z for extremamente alto
+    // 3. OU se a aceleração for muito alta
+    bool rapid_rotation = (gyro_z_rate > GYRO_Z_RATE_THRESHOLD);
+    bool extreme_rotation = (gyro_z_absolute > GYRO_Z_ABSOLUTE_THRESHOLD);
+    bool high_accel = (accel_diff > ACCEL_THRESHOLD);
+    
+    if (rapid_rotation || extreme_rotation || high_accel) {
         shake_detected = true;
         printf("\n⚠️  VIRADA BRUSCA DETECTADA!\n");
+        printf("   Razão: ");
+        if (rapid_rotation) printf("ROTAÇÃO RÁPIDA (Z_rate=%ld > %d) ", gyro_z_rate, GYRO_Z_RATE_THRESHOLD);
+        if (extreme_rotation) printf("ROTAÇÃO EXTREMA (Z_abs=%ld > %d) ", gyro_z_absolute, GYRO_Z_ABSOLUTE_THRESHOLD);
+        if (high_accel) printf("ACELERAÇÃO ALTA (A=%ld > %d)", accel_diff, ACCEL_THRESHOLD);
+        printf("\n");
         printf("   Valores Atuais:\n");
         printf("     Accel: X=%d, Y=%d, Z=%d\n", accel.x, accel.y, accel.z);
         printf("     Gyro:  X=%d, Y=%d, Z=%d\n", gyro.x, gyro.y, gyro.z);
+        printf("     Gyro Z anterior: %d\n", last_gyro_z);
         printf("   Baseline (referência):\n");
         printf("     Accel: X=%d, Y=%d, Z=%d\n", baseline_accel.x, baseline_accel.y, baseline_accel.z);
-        printf("     Gyro:  X=%d, Y=%d, Z=%d\n", baseline_gyro.x, baseline_gyro.y, baseline_gyro.z);
-        printf("   Diferenças:\n");
-        printf("     Accel diff: %ld (threshold: %d)\n", accel_diff, ACCEL_THRESHOLD);
-        printf("     Gyro diff:  %ld (threshold: %d)\n\n", gyro_diff, GYRO_THRESHOLD);
+        printf("     Gyro:  X=%d, Y=%d, Z=%d\n\n", baseline_gyro.x, baseline_gyro.y, baseline_gyro.z);
         return true;
     }
     
@@ -164,10 +202,12 @@ void mpu6050_reset_shake_detection(void) {
     shake_detected = false;
     is_calibrating = true;
     is_calibrated = false;
+    has_last_gyro_z = false;  // Reset do histórico
+    last_gyro_z = 0;
     calibration_start_time = to_ms_since_boot(get_absolute_time());
     printf("MPU6050: Estado de virada resetado\n");
     printf("MPU6050: Iniciando calibração de 10 segundos...\n");
-    printf("         NÃO MOVA O DISPOSITIVO!\n");
+    printf("         N\u00c3O MOVA O DISPOSITIVO!\n");
 }
 
 // Atualizar processo de calibração

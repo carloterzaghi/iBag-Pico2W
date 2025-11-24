@@ -82,40 +82,47 @@ static const tCGI cgi_handlers[] = {
     {"/api/reset", http_api_reset_handler},
 };
 
+// Variável global para rastrear qual POST está sendo processado
+static char current_post_uri[32] = "";
+
 // Handler para POST
 err_t httpd_post_begin(void *connection, const char *uri, const char *http_request,
                       u16_t http_request_len, int content_len, char *response_uri,
                       u16_t response_uri_len, u8_t *post_auto_wnd) {
     if (strncmp(uri, "/api/config", 11) == 0) {
+        strncpy(current_post_uri, uri, sizeof(current_post_uri) - 1);
         return ERR_OK;
     }
     if (strncmp(uri, "/api/reset", 10) == 0) {
+        strncpy(current_post_uri, uri, sizeof(current_post_uri) - 1);
         return ERR_OK;
     }
     return ERR_VAL;
 }
 
 err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
-    // Processar dados JSON recebidos
-    char buffer[256];
-    if (p->len < sizeof(buffer)) {
-        pbuf_copy_partial(p, buffer, p->len, 0);
-        buffer[p->len] = '\0';
-        
-        // Parse simples do JSON para extrair valores
-        char *heater_str = strstr(buffer, "\"heater\":");
-        char *freezer_str = strstr(buffer, "\"freezer\":");
-        
-        if (heater_str) {
-            heater_str += 9; // pula "heater":
-            target_heater_temp = atof(heater_str);
-            printf("Nova temperatura aquecedor: %.1f C\n", target_heater_temp);
-        }
-        
-        if (freezer_str) {
-            freezer_str += 10; // pula "freezer":
-            target_freezer_temp = atof(freezer_str);
-            printf("Nova temperatura congelador: %.1f C\n", target_freezer_temp);
+    // Processar dados JSON recebidos (apenas para config)
+    if (strncmp(current_post_uri, "/api/config", 11) == 0) {
+        char buffer[256];
+        if (p->len < sizeof(buffer)) {
+            pbuf_copy_partial(p, buffer, p->len, 0);
+            buffer[p->len] = '\0';
+            
+            // Parse simples do JSON para extrair valores
+            char *heater_str = strstr(buffer, "\"heater\":");
+            char *freezer_str = strstr(buffer, "\"freezer\":");
+            
+            if (heater_str) {
+                heater_str += 9; // pula "heater":
+                target_heater_temp = atof(heater_str);
+                printf("Nova temperatura aquecedor: %.1f C\n", target_heater_temp);
+            }
+            
+            if (freezer_str) {
+                freezer_str += 10; // pula "freezer":
+                target_freezer_temp = atof(freezer_str);
+                printf("Nova temperatura congelador: %.1f C\n", target_freezer_temp);
+            }
         }
     }
     
@@ -124,7 +131,12 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
 }
 
 void httpd_post_finished(void *connection, char *response_uri, u16_t response_uri_len) {
-    snprintf(response_uri, response_uri_len, "/api_config.json");
+    // Redirecionar para a URI correta baseado no POST recebido
+    if (strncmp(current_post_uri, "/api/reset", 10) == 0) {
+        snprintf(response_uri, response_uri_len, "/api_reset.json");
+    } else {
+        snprintf(response_uri, response_uri_len, "/api_config.json");
+    }
 }
 
 // Handler para fornecer conteúdo dos arquivos
@@ -186,10 +198,29 @@ int fs_open_custom(struct fs_file *file, const char *name) {
         return 1;
     }
     else if (strcmp(name, "/api_reset.json") == 0) {
-        is_shaken = false;
-        mpu6050_reset_shake_detection();
-        printf("Estado balançado resetado\n");
+        printf("\n🔄 RESETANDO ESTADO E RECALIBRANDO...\n");
         
+        // Reset do estado
+        is_shaken = false;
+        
+        printf("Estado balançado resetado\n");
+        printf("⏱️  Iniciando calibração do MPU6050...\n");
+        printf("    NÃO MOVA O DISPOSITIVO por 10 segundos!\n\n");
+        
+        // IMPORTANTE: Resetar e calibrar ANTES de responder HTTP
+        mpu6050_reset_shake_detection();
+        
+        // Aguardar calibração completar (10 segundos) ANTES de responder
+        for (int i = 10; i > 0; i--) {
+            printf("    Calibrando... %d segundos restantes\n", i);
+            sleep_ms(1000);
+            mpu6050_update_calibration();
+            cyw43_arch_poll();  // Manter conexão TCP viva durante calibração
+        }
+        
+        printf("\n✅ Calibração completa! Sistema pronto para detectar movimento.\n\n");
+        
+        // Agora sim, responder HTTP
         static char json_response[64];
         snprintf(json_response, sizeof(json_response), "{\"status\":\"ok\"}");
         file->data = json_response;
@@ -242,6 +273,19 @@ int main() {
         printf("Verifique as conexões I2C (SDA=GPIO20, SCL=GPIO21)\n");
         return 1;
     }
+    
+    // Iniciar calibração automática do MPU6050
+    printf("\n⏱️  Iniciando calibração do MPU6050...\n");
+    printf("    NÃO MOVA O DISPOSITIVO por 10 segundos!\n\n");
+    mpu6050_reset_shake_detection();
+    
+    // Aguardar calibração completar (10 segundos)
+    for (int i = 10; i > 0; i--) {
+        printf("    Calibrando... %d segundos restantes\n", i);
+        sleep_ms(1000);
+        mpu6050_update_calibration();
+    }
+    printf("\n✅ Calibração completa! Sistema pronto para detectar movimento.\n\n");
     
     // Inicializar Wi-Fi em modo AP
     if (cyw43_arch_init()) {
@@ -329,6 +373,7 @@ int main() {
     // LED piscando para indicar que está funcionando
     uint32_t led_counter = 0;
     uint32_t status_print_counter = 0;
+    uint32_t mpu_log_counter = 0;
     
     while (true) {
         // Processar eventos de rede constantemente
@@ -336,6 +381,12 @@ int main() {
         
         // Atualizar processo de calibração do MPU6050
         mpu6050_update_calibration();
+        
+        // Verificar shake do MPU6050 periodicamente (a cada ~100ms)
+        if (mpu_log_counter % 100 == 0) {
+            mpu6050_detect_shake();
+        }
+        mpu_log_counter++;
         
         // LED piscando (controle por contador ao invés de sleep)
         if (led_counter % 10000 == 0) {
@@ -345,7 +396,8 @@ int main() {
         
         // Print de status a cada 5 segundos
         if (status_print_counter % 5000 == 0 && status_print_counter > 0) {
-            printf("[STATUS] Sistema rodando... Aguardando conexões...\n");
+            printf("[STATUS] Sistema rodando... Aguardando conexões... | Shaken: %s\n", 
+                   is_shaken ? "SIM" : "NAO");
         }
         status_print_counter++;
         
