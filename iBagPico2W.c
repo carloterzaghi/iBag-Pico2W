@@ -24,30 +24,30 @@
 #define AP_CHANNEL 1
 
 // Configurações dos sensores LM35
-// GPIO 26 = ADC0, GPIO 27 = ADC1
-#define ADC_HEATER 1    // ADC1 - GPIO 27 (aquecedor)
-#define ADC_FREEZER 0   // ADC0 - GPIO 26 (congelador)
+// GPIO 27 = ADC1 (QUENTE), GPIO 26 = ADC0 (FRIO)
+#define ADC_HEATER 0    // ADC1 - GPIO 27 (sensor quente)
+#define ADC_FREEZER 1   // ADC0 - GPIO 26 (sensor frio)
 
 // Configuração do relé Peltier
-#define PELTIER_RELAY_PIN 15  // GPIO 15 controla o relé do Peltier
+#define PELTIER_RELAY_PIN 15  // GPIO 15 controla o relé
+#define RELAY_OFF_TIME_MS 20000  // 15 segundos desligado quando atinge meta
 
 // Configurações de temperatura (valores configuráveis - NÃO-STATIC para acesso externo)
 float target_heater_temp = 25.0f;   // Temperatura desejada do aquecedor
-float target_freezer_temp = -5.0f;  // Temperatura desejada do congelador
+float target_freezer_temp = 24.0f;  // Temperatura desejada do congelador
 bool is_shaken = false;
 
-// Controle do Peltier
-bool peltier_on = false;
-uint32_t last_peltier_change_ms = 0;
-#define PELTIER_WAIT_TIME_MS 15000  // 15 segundos de espera após mudança
+// Controle do relé
+bool relay_on = false;
+uint32_t relay_off_until = 0;  // Timestamp até quando o relé deve ficar desligado
 
-// Função para inicializar o GPIO do relé Peltier
-void init_peltier_relay(void) {
+// Função para inicializar o relé do Peltier
+void init_relay(void) {
     gpio_init(PELTIER_RELAY_PIN);
     gpio_set_dir(PELTIER_RELAY_PIN, GPIO_OUT);
     gpio_put(PELTIER_RELAY_PIN, 0);  // Desligado inicialmente
-    peltier_on = false;
-    last_peltier_change_ms = to_ms_since_boot(get_absolute_time());
+    relay_on = false;
+    relay_off_until = 0;
     printf("Relé Peltier inicializado (GPIO %d)\n", PELTIER_RELAY_PIN);
     printf("  - Estado inicial: DESLIGADO\n\n");
 }
@@ -55,11 +55,11 @@ void init_peltier_relay(void) {
 // Função para inicializar o ADC
 void init_adc_sensors(void) {
     adc_init();
-    adc_gpio_init(26);  // GPIO 26 como entrada analógica (ADC0)
-    adc_gpio_init(27);  // GPIO 27 como entrada analógica (ADC1)
+    adc_gpio_init(26);  // GPIO 26 como entrada analógica (ADC0 - FRIO)
+    adc_gpio_init(27);  // GPIO 27 como entrada analógica (ADC1 - QUENTE)
     printf("Sensores LM35 inicializados:\n");
-    printf("  - GPIO 27 (ADC1): Aquecedor\n");
-    printf("  - GPIO 26 (ADC0): Congelador\n\n");
+    printf("  - GPIO 27 (ADC1): Sensor QUENTE\n");
+    printf("  - GPIO 26 (ADC0): Sensor FRIO\n\n");
 }
 
 // Função para ler temperatura do LM35 (retorna em Celsius)
@@ -73,66 +73,94 @@ float read_lm35_temp(uint8_t adc_channel) {
     return temperature;
 }
 
-// Função para controlar o Peltier com lógica inteligente
-void control_peltier(void) {
-    uint32_t current_ms = to_ms_since_boot(get_absolute_time());
-    
-    // Verificar se já passaram 15 segundos desde a última mudança
-    if ((current_ms - last_peltier_change_ms) < PELTIER_WAIT_TIME_MS) {
-        return;  // Ainda aguardando estabilização
+// Função para controlar o relé baseado nas temperaturas
+void control_relay(void) {
+    // LOG: Mostrar valores atuais das temperaturas alvo
+    static uint8_t log_counter = 0;
+    if (log_counter++ % 10 == 0) {  // Log a cada 10 chamadas (~20s)
+        printf("🎯 [RELAY CHECK] Alvos: Quente=%.1f°C, Frio=%.1f°C\n", 
+               target_heater_temp, target_freezer_temp);
     }
+    
+    // VERIFICAÇÃO: Só funcionar se temperaturas forem diferentes dos valores padrão
+    if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+        // Valores padrão - relé desabilitado
+        if (relay_on) {
+            relay_on = false;
+            gpio_put(PELTIER_RELAY_PIN, 0);
+            printf("🚫 Relé desligado - Configurações em valores padrão (Quente: 25°C, Frio: 24°C)\n");
+        }
+        return;  // Não fazer nada enquanto estiver nos valores padrão
+    }
+    
+    uint32_t current_time = to_ms_since_boot(get_absolute_time());
     
     // Ler temperaturas atuais
     float current_heater = read_lm35_temp(ADC_HEATER);
     float current_freezer = read_lm35_temp(ADC_FREEZER);
     
-    bool should_turn_on = false;
-    const char* reason = "";
+    // Verificar se alguma temperatura atingiu a meta (dentro da margem de 0.5°C)
+    bool heater_on_target = (current_heater >= target_heater_temp - 0.5f) && 
+                           (current_heater <= target_heater_temp + 0.5f);
+    bool freezer_on_target = (current_freezer >= target_freezer_temp - 0.5f) && 
+                            (current_freezer <= target_freezer_temp + 0.5f);
     
-    // LÓGICA DE DECISÃO:
-    // 1. Prioridade: atingir temperatura quente
-    if (current_heater < target_heater_temp) {
-        // Precisa aquecer, mas verificar se não vai esfriar demais o freezer
-        if (current_freezer > (target_freezer_temp - 2.0f)) {
-            // Freezer ainda está acima do limite seguro, pode aquecer
-            should_turn_on = true;
-            reason = "Aquecendo para atingir temperatura quente";
-        } else {
-            // Freezer está muito frio, não pode aquecer mais
-            should_turn_on = false;
-            reason = "Desligado: temperatura fria muito baixa";
+    // ESTADO 1: Relé está LIGADO - verificar se alguma meta foi atingida
+    if (relay_on) {
+        if (heater_on_target || freezer_on_target) {
+            // Meta atingida! Desligar relé e iniciar período de espera de 15s
+            relay_on = false;
+            gpio_put(PELTIER_RELAY_PIN, 0);
+            relay_off_until = current_time + RELAY_OFF_TIME_MS;
+            printf("\n🎯 META ATINGIDA! Relé DESLIGADO por 15 segundos\n");
+            printf("   Temp Quente: %.1f°C (Alvo: %.1f°C) %s\n", 
+                   current_heater, target_heater_temp, heater_on_target ? "✓" : "✗");
+            printf("   Temp Fria: %.1f°C (Alvo: %.1f°C) %s\n\n", 
+                   current_freezer, target_freezer_temp, freezer_on_target ? "✓" : "✗");
+            
+            // Dar tempo para rede processar
+            sleep_ms(10);
+            cyw43_arch_poll();
         }
-    }
-    // 2. Se temperatura quente OK, verificar temperatura fria
-    else if (current_freezer > target_freezer_temp) {
-        // Precisa esfriar, mas verificar se não vai esquentar demais o aquecedor
-        if (current_heater < (target_heater_temp + 2.0f)) {
-            // Aquecedor ainda está abaixo do limite seguro, pode esfriar
-            should_turn_on = true;
-            reason = "Esfriando para atingir temperatura fria";
-        } else {
-            // Aquecedor está muito quente, não pode esfriar mais
-            should_turn_on = false;
-            reason = "Desligado: temperatura quente muito alta";
-        }
-    }
-    // 3. Ambas temperaturas OK
-    else {
-        should_turn_on = false;
-        reason = "Ambas temperaturas dentro do alvo";
+        // Se não atingiu meta, continuar ligado (não fazer nada)
+        return;
     }
     
-    // Executar mudança apenas se necessário
-    if (should_turn_on != peltier_on) {
-        peltier_on = should_turn_on;
-        gpio_put(PELTIER_RELAY_PIN, peltier_on ? 1 : 0);
-        last_peltier_change_ms = current_ms;
+    // ESTADO 2: Relé está DESLIGADO - verificar se está em período de espera
+    if (relay_off_until > 0 && current_time < relay_off_until) {
+        // Ainda no período de 15 segundos, manter desligado
+        return;
+    }
+    
+    // ESTADO 3: Período de espera terminou, resetar flag
+    if (relay_off_until > 0 && current_time >= relay_off_until) {
+        relay_off_until = 0;
+        printf("✅ Período de espera de 15s terminado\n");
+    }
+    
+    // ESTADO 4: Relé DESLIGADO e sem período de espera - verificar se precisa ligar
+    // Verificar se alguma temperatura está fora do alvo
+    bool heater_off_target = (current_heater < target_heater_temp - 0.5f) || 
+                             (current_heater > target_heater_temp + 0.5f);
+    bool freezer_off_target = (current_freezer < target_freezer_temp - 0.5f) || 
+                              (current_freezer > target_freezer_temp + 0.5f);
+    
+    if (heater_off_target || freezer_off_target) {
+        // Temperatura fora do alvo, LIGAR relé UMA ÚNICA VEZ
+        relay_on = true;
+        gpio_put(PELTIER_RELAY_PIN, 1);
+        printf("\n🔌 Relé LIGADO - Temperatura fora do alvo\n");
+        printf("   Temp Quente: %.1f°C (Alvo: %.1f°C) %s\n", 
+               current_heater, target_heater_temp, heater_off_target ? "FORA DO ALVO" : "OK");
+        printf("   Temp Fria: %.1f°C (Alvo: %.1f°C) %s\n", 
+               current_freezer, target_freezer_temp, freezer_off_target ? "FORA DO ALVO" : "OK");
+        printf("   Aguardando atingir meta para desligar...\n\n");
         
-        printf("\n🔌 PELTIER: %s\n", peltier_on ? "LIGADO" : "DESLIGADO");
-        printf("   Razão: %s\n", reason);
-        printf("   Temp Quente: %.1f°C (Alvo: %.1f°C)\n", current_heater, target_heater_temp);
-        printf("   Temp Fria: %.1f°C (Alvo: %.1f°C)\n\n", current_freezer, target_freezer_temp);
+        // Dar tempo para rede processar após ligar relé
+        sleep_ms(10);
+        cyw43_arch_poll();
     }
+    // Se temperaturas OK, manter desligado (não fazer nada)
 }
 
 // Handler para a página principal
@@ -189,20 +217,34 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
             pbuf_copy_partial(p, buffer, p->len, 0);
             buffer[p->len] = '\0';
             
+            printf("🔧 POST recebido: %s\n", buffer);
+            
             // Parse simples do JSON para extrair valores
             char *heater_str = strstr(buffer, "\"heater\":");
             char *freezer_str = strstr(buffer, "\"freezer\":");
             
+            float old_heater = target_heater_temp;
+            float old_freezer = target_freezer_temp;
+            
             if (heater_str) {
                 heater_str += 9; // pula "heater":
                 target_heater_temp = atof(heater_str);
-                printf("Nova temperatura aquecedor: %.1f C\n", target_heater_temp);
             }
             
             if (freezer_str) {
                 freezer_str += 10; // pula "freezer":
                 target_freezer_temp = atof(freezer_str);
-                printf("Nova temperatura congelador: %.1f C\n", target_freezer_temp);
+            }
+            
+            printf("📊 Temperaturas atualizadas:\n");
+            printf("   Quente: %.1f°C → %.1f°C\n", old_heater, target_heater_temp);
+            printf("   Frio: %.1f°C → %.1f°C\n", old_freezer, target_freezer_temp);
+            
+            // Verificar se relé deve ser habilitado
+            if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+                printf("🚫 Relé DESABILITADO (valores padrão)\n");
+            } else {
+                printf("✅ Relé HABILITADO (valores customizados)\n");
             }
         }
     }
@@ -349,7 +391,7 @@ int main() {
     init_adc_sensors();
     
     // Inicializar relé do Peltier
-    init_peltier_relay();
+    init_relay();
     
     // Inicializar MPU6050 (acelerômetro/giroscópio)
     if (!mpu6050_init()) {
@@ -458,7 +500,7 @@ int main() {
     uint32_t led_counter = 0;
     uint32_t status_print_counter = 0;
     uint32_t mpu_log_counter = 0;
-    uint32_t peltier_check_counter = 0;
+    uint32_t relay_check_counter = 0;
     
     while (true) {
         // Processar eventos de rede constantemente
@@ -473,11 +515,11 @@ int main() {
         }
         mpu_log_counter++;
         
-        // Controlar Peltier a cada 1 segundo
-        if (peltier_check_counter % 1000 == 0) {
-            control_peltier();
+        // Controlar relé a cada 2 segundos (reduzir carga)
+        if (relay_check_counter % 2000 == 0) {
+            control_relay();
         }
-        peltier_check_counter++;
+        relay_check_counter++;
         
         // LED piscando (controle por contador ao invés de sleep)
         if (led_counter % 10000 == 0) {
@@ -487,9 +529,9 @@ int main() {
         
         // Print de status a cada 5 segundos
         if (status_print_counter % 5000 == 0 && status_print_counter > 0) {
-            printf("[STATUS] Sistema rodando... | Shaken: %s | Peltier: %s\n", 
+            printf("[STATUS] Sistema rodando... | Shaken: %s | Relé: %s\n", 
                    is_shaken ? "SIM" : "NAO",
-                   peltier_on ? "LIGADO" : "DESLIGADO");
+                   relay_on ? "LIGADO" : "DESLIGADO");
         }
         status_print_counter++;
         

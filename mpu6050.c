@@ -141,8 +141,8 @@ bool mpu6050_detect_shake(void) {
     
     // Se já detectou shake, retornar true (mas ainda mostrar dados)
     if (shake_detected) {
-        printf("[MPU6050] SHAKE JA DETECTADO! Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d\n",
-               accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
+        // printf("[MPU6050] SHAKE JA DETECTADO! Accel: X=%6d Y=%6d Z=%6d | Gyro: X=%6d Y=%6d Z=%6d\n",
+        //        accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
         return true;
     }
     

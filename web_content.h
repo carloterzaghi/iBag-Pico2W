@@ -170,7 +170,7 @@ const char html_content[] =
 "                <div class=\"input-group\">\n"
 "                    <label><span>❄️</span> Temperatura do Congelador</label>\n"
 "                    <div class=\"input-wrapper\">\n"
-"                        <input type=\"number\" id=\"freezerTemp\" min=\"-50\" max=\"20\" step=\"0.5\" value=\"-5\">\n"
+"                        <input type=\"number\" id=\"freezerTemp\" min=\"-50\" max=\"20\" step=\"0.5\" value=\"24\">\n"
 "                        <span class=\"unit\">°C</span>\n"
 "                    </div>\n"
 "                </div>\n"

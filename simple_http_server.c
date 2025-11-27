@@ -68,6 +68,44 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
     
     printf("Request:\n%s\n", request);
     
+    // DETECTAR SE É APENAS JSON (segundo pacote do POST)
+    if (request[0] == '{' && strstr(request, "\"heater\"") != NULL) {
+        printf("🔧 POST JSON recebido: %s\n", request);
+        
+        // Parse do JSON
+        char *heater_str = strstr(request, "\"heater\":");
+        char *freezer_str = strstr(request, "\"freezer\":");
+        
+        float old_heater = target_heater_temp;
+        float old_freezer = target_freezer_temp;
+        
+        if (heater_str) {
+            heater_str += 9;
+            target_heater_temp = atof(heater_str);
+        }
+        
+        if (freezer_str) {
+            freezer_str += 10;
+            target_freezer_temp = atof(freezer_str);
+        }
+        
+        printf("📊 Temperaturas atualizadas:\n");
+        printf("   Quente: %.1f°C → %.1f°C\n", old_heater, target_heater_temp);
+        printf("   Frio: %.1f°C → %.1f°C\n", old_freezer, target_freezer_temp);
+        
+        // Verificar se relé deve ser habilitado
+        if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+            printf("🚫 Relé DESABILITADO (valores padrão)\n");
+        } else {
+            printf("✅ Relé HABILITADO (valores customizados)\n");
+        }
+        
+        // Liberar pbuf e não responder (resposta já foi enviada no primeiro pacote)
+        tcp_recved(pcb, p->tot_len);
+        pbuf_free(p);
+        return ERR_OK;
+    }
+    
     // Preparar resposta HTTP
     static char response[50000];
     int len = 0;
