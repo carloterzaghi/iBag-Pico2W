@@ -26,7 +26,7 @@
 // Configurações dos sensores LM35
 // GPIO 27 = ADC1 (QUENTE), GPIO 26 = ADC0 (FRIO)
 #define ADC_HEATER 0    // ADC1 - GPIO 27 (sensor quente)
-#define ADC_FREEZER 1   // ADC0 - GPIO 26 (sensor frio)
+#define ADC_CONSERVATIVE 1   // ADC0 - GPIO 26 (sensor frio)
 
 // Configuração do relé Peltier
 #define PELTIER_RELAY_PIN 15  // GPIO 15 controla o relé
@@ -34,7 +34,7 @@
 
 // Configurações de temperatura (valores configuráveis - NÃO-STATIC para acesso externo)
 float target_heater_temp = 0.0f;   // Temperatura desejada do aquecedor
-float target_freezer_temp = 0.0f;  // Temperatura desejada do conservador
+float target_conservative_temp = 0.0f;  // Temperatura desejada do conservador
 bool is_shaken = false;
 
 // Controle do relé
@@ -79,11 +79,11 @@ void control_relay(void) {
     static uint8_t log_counter = 0;
     if (log_counter++ % 10 == 0) {  // Log a cada 10 chamadas (~20s)
         printf("🎯 [RELAY CHECK] Alvos: Quente=%.1f°C, Frio=%.1f°C\n", 
-               target_heater_temp, target_freezer_temp);
+               target_heater_temp, target_conservative_temp);
     }
     
     // VERIFICAÇÃO: Só funcionar se temperaturas forem diferentes dos valores padrão
-    if (target_heater_temp == 0.0f && target_freezer_temp == 0.0f) {
+    if (target_heater_temp == 0.0f && target_conservative_temp == 0.0f) {
         // Valores padrão - relé desabilitado
         if (relay_on) {
             relay_on = false;
@@ -97,17 +97,17 @@ void control_relay(void) {
     
     // Ler temperaturas atuais
     float current_heater = read_lm35_temp(ADC_HEATER);
-    float current_freezer = read_lm35_temp(ADC_FREEZER);
+    float current_conservative = read_lm35_temp(ADC_CONSERVATIVE);
     
     // Verificar se alguma temperatura atingiu a meta (dentro da margem de 0.5°C)
     bool heater_on_target = (current_heater >= target_heater_temp - 0.5f) && 
                            (current_heater <= target_heater_temp + 0.5f);
-    bool freezer_on_target = (current_freezer >= target_freezer_temp - 0.5f) && 
-                            (current_freezer <= target_freezer_temp + 0.5f);
+    bool conservative_on_target = (current_conservative >= target_conservative_temp - 0.5f) && 
+                            (current_conservative <= target_conservative_temp + 0.5f);
     
     // ESTADO 1: Relé está LIGADO - verificar se alguma meta foi atingida
     if (relay_on) {
-        if (heater_on_target || freezer_on_target) {
+        if (heater_on_target || conservative_on_target) {
             // Meta atingida! Desligar relé e iniciar período de espera de 15s
             relay_on = false;
             gpio_put(PELTIER_RELAY_PIN, 0);
@@ -116,7 +116,7 @@ void control_relay(void) {
             printf("   Temp Quente: %.1f°C (Alvo: %.1f°C) %s\n", 
                    current_heater, target_heater_temp, heater_on_target ? "✓" : "✗");
             printf("   Temp Fria: %.1f°C (Alvo: %.1f°C) %s\n\n", 
-                   current_freezer, target_freezer_temp, freezer_on_target ? "✓" : "✗");
+                   current_conservative, target_conservative_temp, conservative_on_target ? "✓" : "✗");
             
             // Dar tempo para rede processar
             sleep_ms(10);
@@ -142,10 +142,10 @@ void control_relay(void) {
     // Verificar se alguma temperatura está fora do alvo
     bool heater_off_target = (current_heater < target_heater_temp - 0.5f) || 
                              (current_heater > target_heater_temp + 0.5f);
-    bool freezer_off_target = (current_freezer < target_freezer_temp - 0.5f) || 
-                              (current_freezer > target_freezer_temp + 0.5f);
+    bool conservative_off_target = (current_conservative < target_conservative_temp - 0.5f) || 
+                              (current_conservative > target_conservative_temp + 0.5f);
     
-    if (heater_off_target || freezer_off_target) {
+    if (heater_off_target || conservative_off_target) {
         // Temperatura fora do alvo, LIGAR relé UMA ÚNICA VEZ
         relay_on = true;
         gpio_put(PELTIER_RELAY_PIN, 1);
@@ -153,7 +153,7 @@ void control_relay(void) {
         printf("   Temp Quente: %.1f°C (Alvo: %.1f°C) %s\n", 
                current_heater, target_heater_temp, heater_off_target ? "FORA DO ALVO" : "OK");
         printf("   Temp Fria: %.1f°C (Alvo: %.1f°C) %s\n", 
-               current_freezer, target_freezer_temp, freezer_off_target ? "FORA DO ALVO" : "OK");
+               current_conservative, target_conservative_temp, conservative_off_target ? "FORA DO ALVO" : "OK");
         printf("   Aguardando atingir meta para desligar...\n\n");
         
         // Dar tempo para rede processar após ligar relé
@@ -221,27 +221,27 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
             
             // Parse simples do JSON para extrair valores
             char *heater_str = strstr(buffer, "\"heater\":");
-            char *freezer_str = strstr(buffer, "\"freezer\":");
+            char *conservative_str = strstr(buffer, "\"freezer\":");
             
             float old_heater = target_heater_temp;
-            float old_freezer = target_freezer_temp;
+            float old_conservative = target_conservative_temp;
             
             if (heater_str) {
                 heater_str += 9; // pula "heater":
                 target_heater_temp = atof(heater_str);
             }
             
-            if (freezer_str) {
-                freezer_str += 10; // pula "freezer":
-                target_freezer_temp = atof(freezer_str);
+            if (conservative_str) {
+                conservative_str += 10; // pula "freezer":
+                target_conservative_temp = atof(conservative_str);
             }
             
             printf("📊 Temperaturas atualizadas:\n");
             printf("   Quente: %.1f°C → %.1f°C\n", old_heater, target_heater_temp);
-            printf("   Frio: %.1f°C → %.1f°C\n", old_freezer, target_freezer_temp);
+            printf("   Frio: %.1f°C → %.1f°C\n", old_conservative, target_conservative_temp);
             
             // Verificar se relé deve ser habilitado
-            if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+            if (target_heater_temp == 25.0f && target_conservative_temp == 24.0f) {
                 printf("🚫 Relé DESABILITADO (valores padrão)\n");
             } else {
                 printf("✅ Relé HABILITADO (valores customizados)\n");
@@ -291,7 +291,7 @@ int fs_open_custom(struct fs_file *file, const char *name) {
         static char json_response[128];
         snprintf(json_response, sizeof(json_response),
                 "{\"status\":\"ok\",\"heater\":%.1f,\"freezer\":%.1f}",
-                target_heater_temp, target_freezer_temp);
+                target_heater_temp, target_conservative_temp);
         file->data = json_response;
         file->len = strlen(json_response);
         file->index = 0;
@@ -303,7 +303,7 @@ int fs_open_custom(struct fs_file *file, const char *name) {
         
         // Ler temperaturas reais dos sensores LM35
         float current_heater = read_lm35_temp(ADC_HEATER);
-        float current_freezer = read_lm35_temp(ADC_FREEZER);
+        float current_conservative = read_lm35_temp(ADC_CONSERVATIVE);
         
         // Verificar virada brusca usando MPU6050
         if (!is_shaken) {
@@ -312,7 +312,7 @@ int fs_open_custom(struct fs_file *file, const char *name) {
         
         snprintf(json_response, sizeof(json_response),
                 "{\"heater\":%.1f,\"freezer\":%.1f,\"shaken\":%s}",
-                current_heater, current_freezer, is_shaken ? "true" : "false");
+                current_heater, current_conservative, is_shaken ? "true" : "false");
         
         file->data = json_response;
         file->len = strlen(json_response);

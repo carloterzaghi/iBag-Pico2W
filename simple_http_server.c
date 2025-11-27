@@ -7,12 +7,12 @@
 
 extern const char html_content[];
 extern float target_heater_temp;
-extern float target_freezer_temp;
+extern float target_conservative_temp;
 extern bool is_shaken;
 
 // Definições dos ADC channels
 #define ADC_HEATER 1    // ADC1 - GPIO 27 (aquecedor)
-#define ADC_FREEZER 0   // ADC0 - GPIO 26 (congelador)
+#define ADC_CONSERVATIVE 0   // ADC0 - GPIO 26 (conservador)
 
 // Funções auxiliares (declaradas em iBagPico2W.c e mpu6050.c)
 extern float read_lm35_temp(uint8_t adc_channel);
@@ -74,27 +74,27 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
         
         // Parse do JSON
         char *heater_str = strstr(request, "\"heater\":");
-        char *freezer_str = strstr(request, "\"freezer\":");
+        char *conservative_str = strstr(request, "\"freezer\":");
         
         float old_heater = target_heater_temp;
-        float old_freezer = target_freezer_temp;
+        float old_conservative = target_conservative_temp;
         
         if (heater_str) {
             heater_str += 9;
             target_heater_temp = atof(heater_str);
         }
         
-        if (freezer_str) {
-            freezer_str += 10;
-            target_freezer_temp = atof(freezer_str);
+        if (conservative_str) {
+            conservative_str += 10;
+            target_conservative_temp = atof(conservative_str);
         }
         
         printf("📊 Temperaturas atualizadas:\n");
         printf("   Quente: %.1f°C → %.1f°C\n", old_heater, target_heater_temp);
-        printf("   Frio: %.1f°C → %.1f°C\n", old_freezer, target_freezer_temp);
+        printf("   Frio: %.1f°C → %.1f°C\n", old_conservative, target_conservative_temp);
         
         // Verificar se relé deve ser habilitado
-        if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+        if (target_heater_temp == 25.0f && target_conservative_temp == 24.0f) {
             printf("🚫 Relé DESABILITADO (valores padrão)\n");
         } else {
             printf("✅ Relé HABILITADO (valores customizados)\n");
@@ -143,7 +143,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                 else if (is_get && strcmp(uri, "/api/status") == 0) {
                     // API de status - ler sensores LM35 reais
                     float current_heater = read_lm35_temp(ADC_HEATER);
-                    float current_freezer = read_lm35_temp(ADC_FREEZER);
+                    float current_conservative = read_lm35_temp(ADC_CONSERVATIVE);
                     
                     if (!is_shaken) {
                         is_shaken = mpu6050_detect_shake();
@@ -152,7 +152,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                     char json[256];
                     int json_len = snprintf(json, sizeof(json),
                             "{\"heater\":%.1f,\"freezer\":%.1f,\"shaken\":%s}",
-                            current_heater, current_freezer, is_shaken ? "true" : "false");
+                            current_heater, current_conservative, is_shaken ? "true" : "false");
                     
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
@@ -172,7 +172,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                         
                         // Parse simples do JSON
                         char *heater_str = strstr(body, "\"heater\":");
-                        char *freezer_str = strstr(body, "\"freezer\":");
+                        char *conservative_str = strstr(body, "\"freezer\":");
                         
                         if (heater_str) {
                             heater_str += 9;
@@ -180,17 +180,17 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
                             printf("Nova temperatura aquecedor: %.1f C\n", target_heater_temp);
                         }
                         
-                        if (freezer_str) {
-                            freezer_str += 10;
-                            target_freezer_temp = atof(freezer_str);
-                            printf("Nova temperatura congelador: %.1f C\n", target_freezer_temp);
+                        if (conservative_str) {
+                            conservative_str += 10;
+                            target_conservative_temp = atof(conservative_str);
+                            printf("Nova temperatura conservador: %.1f C\n", target_conservative_temp);
                         }
                     }
                     
                     char json[128];
                     int json_len = snprintf(json, sizeof(json),
                             "{\"status\":\"ok\",\"heater\":%.1f,\"freezer\":%.1f}",
-                            target_heater_temp, target_freezer_temp);
+                            target_heater_temp, target_conservative_temp);
                     
                     len = snprintf(response, sizeof(response),
                         "HTTP/1.1 200 OK\r\n"
