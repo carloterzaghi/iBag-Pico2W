@@ -33,8 +33,8 @@
 #define RELAY_OFF_TIME_MS 20000  // 15 segundos desligado quando atinge meta
 
 // Configurações de temperatura (valores configuráveis - NÃO-STATIC para acesso externo)
-float target_heater_temp = 25.0f;   // Temperatura desejada do aquecedor
-float target_freezer_temp = 24.0f;  // Temperatura desejada do congelador
+float target_heater_temp = 0.0f;   // Temperatura desejada do aquecedor
+float target_freezer_temp = 0.0f;  // Temperatura desejada do conservador
 bool is_shaken = false;
 
 // Controle do relé
@@ -83,7 +83,7 @@ void control_relay(void) {
     }
     
     // VERIFICAÇÃO: Só funcionar se temperaturas forem diferentes dos valores padrão
-    if (target_heater_temp == 25.0f && target_freezer_temp == 24.0f) {
+    if (target_heater_temp == 0.0f && target_freezer_temp == 0.0f) {
         // Valores padrão - relé desabilitado
         if (relay_on) {
             relay_on = false;
